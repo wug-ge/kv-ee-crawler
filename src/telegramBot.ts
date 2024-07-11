@@ -13,5 +13,3 @@ export async function sendNewHouses(houses: { title: string; url: string; }[]) {
         await bot.telegram.sendMessage(chatId, message);
     }
 }
-
-bot.launch();
