@@ -1,68 +1,91 @@
-import axios from "axios";
-import fs from "fs";
-import path from "path";
+import puppeteer from 'puppeteer';
+import fs from 'fs';
+import path from 'path';
 
-const KV_URL =
-  "https://www.kv.ee/en/search&orderby=ob&deal_type=1&county=1&parish=1061";
-const LAST_CRAWL_FILE = path.join(__dirname, "../lastCrawl.json");
+const KV_URL = 'https://www.kv.ee/en/search?deal_type=3&county=1&view=gallery&orderby=cdwl';
+const FOUND_HOUSES_FILE = path.join(__dirname, 'foundHouses.json');
 
 interface House {
-  id: string;
-  title: string;
-  url: string;
-  date_activated: string;
+    title: string;
+    url: string;
 }
 
 async function fetchHouses(): Promise<House[]> {
-  try {
-    const { data } = await axios.get(KV_URL, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
-        Accept: "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "en-US,en;q=0.5",
-        "X-Requested-With": "XMLHttpRequest",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        Priority: "u=0",
-      },
-    });
-    return data.objects.map((item: any) => ({
-      id: item.object_id,
-      title: `${item.price_eur}€`,
-      url: `https://www.kv.ee/${item.object_id}`,
-      date_activated: item.date_activated,
-    }));
-  } catch (error) {
-    console.error("Error fetching data from kv.ee:", error);
-    return [];
-  }
+    try {
+        const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+        const page = await browser.newPage();
+
+        // Listen for console events and log them to the Node.js console
+        page.on('console', msg => {
+            for (let i = 0; i < msg.args().length; ++i) {
+                console.log(`${i}: ${msg.args()[i]}`);
+            }
+        });
+
+        // Set a realistic user agent
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+
+        // Set other realistic settings
+        await page.setViewport({ width: 1280, height: 800 });
+        await page.setJavaScriptEnabled(true);
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'en-US,en;q=0.9',
+        });
+
+
+        await page.goto(KV_URL, { waitUntil: 'networkidle2' });
+
+        // Evaluate the page in the browser context to extract house data
+        const houses: House[] = await page.evaluate(() => {
+            const houseElements = document.querySelectorAll('.results > .object-type-house');
+            const houseData: House[] = [];
+
+            houseElements.forEach(element => {
+                const titleElement = element.querySelector('.price');
+                const title = titleElement ? titleElement.textContent?.trim() : '';
+                const aTag = element.querySelector('a')
+                const relativeUrl = aTag ? aTag.getAttribute('href') : '';
+                const url = relativeUrl ? `https://www.kv.ee${relativeUrl}` : '';
+
+                if (title && url) {
+                    houseData.push({ title, url });
+                }
+            });
+
+            return houseData;
+        });
+
+        await browser.close();
+        return houses;
+    } catch (error) {
+        console.error('Error fetching data from kv.ee:', error);
+        return [];
+    }
 }
 
-function getLastCrawlTime(): Date {
-  try {
-    const lastCrawlData = fs.readFileSync(LAST_CRAWL_FILE, "utf-8");
-    const { lastCrawl } = JSON.parse(lastCrawlData);
-    return new Date(lastCrawl);
-  } catch (error) {
-    return new Date(0); // Return epoch if no last crawl time found
-  }
+function loadFoundHouses(): House[] {
+    try {
+        const data = fs.readFileSync(FOUND_HOUSES_FILE, 'utf-8');
+        return JSON.parse(data);
+    } catch (error) {
+        return [];
+    }
 }
 
-function saveLastCrawlTime() {
-  const lastCrawl = new Date().toISOString();
-  fs.writeFileSync(LAST_CRAWL_FILE, JSON.stringify({ lastCrawl }), "utf-8");
+function saveFoundHouses(houses: House[]) {
+    fs.writeFileSync(FOUND_HOUSES_FILE, JSON.stringify(houses, null, 2), 'utf-8');
 }
 
 export async function getNewHouses(): Promise<House[]> {
-  const lastCrawlTime = getLastCrawlTime();
-  const houses = await fetchHouses();
+    const foundHouses = loadFoundHouses();
+    const foundUrls = new Set(foundHouses.map(house => house.url));
 
-  const newHouses = houses.filter(
-    (house) => new Date(house.date_activated) > lastCrawlTime
-  );
-  saveLastCrawlTime();
+    const houses = await fetchHouses();
+    const newHouses = houses.filter(house => !foundUrls.has(house.url));
 
-  return newHouses;
+    if (newHouses.length > 0) {
+        saveFoundHouses([...foundHouses, ...newHouses]);
+    }
+
+    return newHouses;
 }
